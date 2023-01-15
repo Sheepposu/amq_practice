@@ -10,11 +10,76 @@ import random
 import wx
 from wx.media import MediaCtrl, EVT_MEDIA_LOADED, MEDIABACKEND_WMP10, EVT_MEDIA_PLAY
 from wx.lib.scrolledpanel import ScrolledPanel
+from wx.lib.buttons import GenButton as _Button
 
 from enums import GameState
 from structure import Game
 from util import *
 from base import *
+
+
+class Text(wx.StaticText, RelativeObject):
+    CONTAINS_TEXT = True
+
+    def __init__(self, parent, position, size, font_size, *args, **kwargs):
+        self.POSITION = RelativeParameter(*position)
+        self.SIZE = RelativeParameter(*size)
+        self.FONT_SIZE = font_size
+        wx.StaticText.__init__(self, parent, *args, **kwargs)
+        RelativeObject.__init__(self)
+
+
+class TextButton(_Button, RelativeObject):
+    CONTAINS_TEXT = True
+
+    def __init__(self, parent, position, size, font_size, hover_color=None, *args, **kwargs):
+        self.POSITION = RelativeParameter(*position)
+        self.SIZE = RelativeParameter(*size)
+        self.FONT_SIZE = font_size
+        _Button.__init__(self, parent, *args, **kwargs)
+        RelativeObject.__init__(self)
+
+        self.bg_color = self.GetBackgroundColour()
+        self.hover_color = hover_color if hover_color is not None else self.bg_color
+
+        self.Bind(wx.EVT_ENTER_WINDOW, self.on_hover)
+        self.Bind(wx.EVT_LEAVE_WINDOW, self.on_unhover)
+
+    def on_hover(self, evt):
+        self.SetBackgroundColour(self.hover_color)
+        self.Refresh()
+
+    def on_unhover(self, evt):
+        self.SetOwnBackgroundColour(self.bg_color)
+        self.Refresh()
+
+
+class SliderSetting(wx.Slider, RelativeObject):
+    def __init__(self, parent, min_value, max_value, default_value, position, size, setting=None):
+        self.POSITION = RelativeParameter(*position)
+        self.SIZE = RelativeParameter(*size)
+        self.setting = setting
+        wx.Slider.__init__(self, parent, value=default_value, minValue=min_value, maxValue=max_value)
+        RelativeObject.__init__(self)
+
+
+class Image(wx.StaticBitmap, RelativeSize, RelativePosition):
+    def __init__(self, parent, position, size, file):
+        self.POSITION = RelativeParameter(*position)
+        self.SIZE = RelativeParameter(*size)
+        wx.StaticBitmap.__init__(self, parent, bitmap=wx.Bitmap(file, wx.BITMAP_TYPE_ANY))
+        self.image_size = self.GetSize()
+        RelativeSize.__init__(self)
+        RelativePosition.__init__(self)
+
+    @property
+    def _size(self):
+        if self.SIZE.h == 0:
+            w = self.SIZE.w * self.GetParent().GetSize()[0]
+            return wx.Size(w, int(self.image_size[1]/self.image_size[0]*w))
+        else:
+            h = self.SIZE.h * self.GetParent().GetSize()[1]
+            return wx.Size(int(self.image_size[0]/self.image_size[1]*h), h)
 
 
 class GamePanel(RelativePanel):
@@ -27,12 +92,22 @@ class GamePanel(RelativePanel):
             super().__init__(parent, szBackend=MEDIABACKEND_WMP10)
             RelativeObject.__init__(self)
 
-            self.section_length = 20000  # TODO: adjustable
+            self.section_length = 20000
+            self.volume = 0.5
             self.timer = None
             self.starting_point = None
 
+            self.SetVolume(self.volume)
+
             self.Bind(EVT_MEDIA_LOADED, self.on_loaded)
             self.Bind(EVT_MEDIA_PLAY, self.on_played)
+
+        def adjust_volume(self, volume):
+            self.volume = volume
+            self.SetVolume(self.volume)
+
+        def load_settings(self, settings):
+            self.section_length = settings["guess_time"] * 1000
 
         def reset(self):
             self.starting_point = None
@@ -45,7 +120,6 @@ class GamePanel(RelativePanel):
                     self.starting_point = start
 
         def on_loaded(self, evt=None):
-            self.SetVolume(0.5)  # TODO: volume variable and adjustable
             if self.starting_point is None:
                 self.starting_point = random.randint(0, self.Length() - self.section_length)
             self.Seek(self.starting_point)
@@ -53,7 +127,7 @@ class GamePanel(RelativePanel):
 
         def on_played(self, evt=None):
             self.timer = CallbackTimer(self.on_finished)
-            self.timer.StartOnce(20000)
+            self.timer.StartOnce(self.section_length)
             self.GetParent().on_played()
 
         def on_stopped(self, evt=None):
@@ -179,6 +253,9 @@ class GamePanel(RelativePanel):
         self.player.Hide()
         self.dropdown = self.DropdownSelect(self)
         self.dropdown.Hide()
+        self.volume = SliderSetting(self, 0, 100, int(self.player.volume*100), (0.78, 0.0), (0.2, 0.05))
+        # volume_image = Image(self, (0.75, 0.0), (0.05, 0), "assets/images/volume.png")
+        # volume_image.Hide()
         # Show loading screen while loading game data
         self.loading = self.LoadingText(self)
 
@@ -189,16 +266,23 @@ class GamePanel(RelativePanel):
         self.anime_list = list(set(self.anime_list))
         self.currently_playing = None
         self.state = GameState.NOTPLAYING
+        self.settings = {}
+        self.results = []
 
         # Show play screen
         self.loading.Destroy()
         self.text_box.Show()
         self.player.Show()
         self.dropdown.Show()
+        # volume_image.Show()
 
         self.Bind(wx.EVT_TEXT, self.on_text, self.text_box)
         self.text_box.Bind(wx.EVT_KEY_DOWN, self.on_keydown)
         self.text_box.Bind(wx.EVT_TEXT_ENTER, self.on_text_enter)
+        self.Bind(wx.EVT_SCROLL, self.on_volume_adjust, self.volume)
+
+    def on_volume_adjust(self, evt):
+        self.player.adjust_volume(self.volume.GetValue()/100)
 
     def on_keydown(self, evt=None):
         keycode = evt.GetKeyCode()
@@ -239,17 +323,30 @@ class GamePanel(RelativePanel):
 
     def on_stopped(self):
         if self.state == GameState.GUESSING:
-            if self.text_box.GetValue().lower() in list(map(str.lower, self.currently_playing.anime.values())):
-                print("Correct!")
-            else:
-                print("Wrong!")
-            self.play_with_video()
+            self.on_guessing_end()
         elif self.state == GameState.REVEALING:
-            self.player.reset()
-            self.text_box.SetValue("")
-            self.play_round()
+            self.on_reveal_end()
 
-    def on_open(self):
+    def on_guessing_end(self):
+        if self.text_box.GetValue().lower() in list(map(str.lower, self.currently_playing.anime.values())):
+            print("Correct!")
+            self.results.append(True)
+        else:
+            print("Wrong!")
+            self.results.append(False)
+        self.play_with_video()
+
+    def on_reveal_end(self):
+        self.player.reset()
+        self.text_box.SetValue("")
+        if len(self.results) < self.settings["songs"]:
+            self.play_round()
+        else:
+            self.GetParent().end()
+
+    def on_open(self, settings):
+        self.settings = settings
+        self.player.load_settings(settings)
         self.play_round()
 
     def on_size(self, children=True):
@@ -264,8 +361,35 @@ class StartScreenPanel(RelativePanel):
     def __init__(self, parent):
         super().__init__(parent)
 
-        btn = wx.Button(self, label="press me")
-        self.Bind(wx.EVT_BUTTON, parent.start, btn)
+        self.settings = {
+            "songs": 20,
+            "guess_time": 20
+        }
+
+        hover_color = wx.Colour(*map(lambda num: num-20, self.GetBackgroundColour()))
+        self.song_slider = SliderSetting(self, 1, 100, 20, (0.25, 0.1), (0.5, 0.1), "songs")
+        self.song_text = Text(self, (0, 0.2), (1, 0.1), 0.6,
+                              label=f"Number of songs: {self.song_slider.GetValue()}",
+                              style=wx.ALIGN_CENTRE_HORIZONTAL | wx.ST_NO_AUTORESIZE)
+        self.guess_slider = SliderSetting(self, 5, 60, 20, (0.25, 0.35), (0.5, 0.1), "guess_time")
+        self.guess_text = Text(self, (0, 0.45), (1, 0.1), 0.6,
+                               label=f"Guess time: {self.guess_slider.GetValue()}",
+                               style=wx.ALIGN_CENTRE_HORIZONTAL | wx.ST_NO_AUTORESIZE)
+
+        self.start_button = TextButton(self, (0.4, 0.6), (0.2, 0.1), 0.6, hover_color, label="Start")
+
+        self.Bind(wx.EVT_SCROLL, lambda evt: self.on_slider_adjust(evt, self.song_text), self.song_slider)
+        self.Bind(wx.EVT_SCROLL, lambda evt: self.on_slider_adjust(evt, self.guess_text), self.guess_slider)
+        self.Bind(wx.EVT_BUTTON, self.on_start, self.start_button)
+
+    def on_slider_adjust(self, evt, text):
+        slider = evt.GetEventObject()
+        self.settings[slider.setting] = slider.GetValue()
+        label_text = " ".join(text.GetLabelText().split()[:-1])
+        text.SetLabelText(f"{label_text} {self.settings[slider.setting]}")
+
+    def on_start(self, evt):
+        self.GetParent().start()
 
 
 class AppFrame(wx.Frame):
@@ -282,10 +406,14 @@ class AppFrame(wx.Frame):
 
         self.Bind(wx.EVT_SIZE, self.on_size)
 
-    def start(self, evt=None):
+    def start(self):
         self.game_panel.Show()
         self.start_panel.Hide()
-        self.game_panel.on_open()
+        self.game_panel.on_open(self.start_panel.settings)
+
+    def end(self):
+        self.start_panel.Show()
+        self.game_panel.Hide()
 
     def on_size(self, evt=None):
         for child in self.GetChildren():
